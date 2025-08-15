@@ -15,12 +15,12 @@ const PORT = process.env.PORT || 5000;
 // Configuration
 const CONFIG = {
   STREAM_API_KEYS: [
-    '82f9520d915e75bbe1df1c93',
-    '757245d8037f14775b9cfef8',
-    '74f596a5c7f2c16747eba33c',
-    '79d324569b3e0f16a11bb79c',
-    '1042fc7f00df7e878f3ca270',
-    'df9c7330b4c1807041d5d386'
+    '14063cf14257d4fb0e8c1731',
+    '450ffde1fa67154e76637d1d',
+    'a883338a3c4c665cf1b2a514',
+    '0e4505e79e9c664e793c95a5',
+    '57c8efbed6322651d930e1ee',
+    '79c88772805f41e56238debd'
   ],
   TMDB_API_KEY: 'b85ea590b2ffd2a8d04e068fc069001e',
   DASHBOARD_PASSWORD: 'Alien101',
