@@ -15,12 +15,12 @@ const PORT = process.env.PORT || 5000;
 // Configuration
 const CONFIG = {
   STREAM_API_KEYS: [
-    '14063cf14257d4fb0e8c1731',
-    '450ffde1fa67154e76637d1d',
-    'a883338a3c4c665cf1b2a514',
-    '0e4505e79e9c664e793c95a5',
-    '57c8efbed6322651d930e1ee',
-    '79c88772805f41e56238debd'
+    'df9c7330b4c1807041d5d386',
+    '1042fc7f00df7e878f3ca270',
+    '79d324569b3e0f16a11bb79c',
+    '74f596a5c7f2c16747eba33c',
+    '757245d8037f14775b9cfef8',
+    '82f9520d915e75bbe1df1c93'
   ],
   TMDB_API_KEY: 'b85ea590b2ffd2a8d04e068fc069001e',
   DASHBOARD_PASSWORD: 'Alien101',
@@ -322,6 +322,25 @@ const deleteVideo = async (videoId) => {
   } catch (error) {
     log(`Delete failed [${videoId}]: ${error.message}`, 'ERROR');
     return false;
+  }
+};
+
+// NEW: Clone video
+const cloneVideo = async (videoId) => {
+  try {
+    const response = await axios.post(CONFIG.STREAM_API_BASE, {
+      videoId: videoId
+    }, {
+      headers: {
+        'api-token': getApiKey(),
+        'Content-Type': 'application/json'
+      }
+    });
+    log(`Video cloned: ${videoId}. New ID: ${response.data.id}`);
+    return { success: true, newId: response.data.id };
+  } catch (error) {
+    log(`Clone failed [${videoId}]: ${error.message}`, 'ERROR');
+    return { success: false, error: error.message };
   }
 };
 
@@ -871,6 +890,70 @@ app.get('/api/upload/progress', async (req, res) => {
   }
 });
 
+// NEW: Single video clone endpoint
+app.post('/api/video/clone', async (req, res) => {
+  try {
+    const { videoId } = req.body;
+    if (!videoId) {
+      return res.status(400).json({ success: false, error: 'videoId is required' });
+    }
+
+    const result = await cloneVideo(videoId);
+
+    if (result.success) {
+      res.json({ success: true, message: `Video cloned successfully. New ID: ${result.newId}`, data: result });
+    } else {
+      res.status(500).json({ success: false, error: 'Failed to clone video', details: result.error });
+    }
+  } catch (error) {
+    log(`Clone video error: ${error.message}`, 'ERROR');
+    res.status(500).json({ success: false, error: 'Internal server error', details: error.message });
+  }
+});
+
+// NEW: Batch video clone endpoint
+app.post('/api/video/clone/batch', async (req, res) => {
+  try {
+    const { videoIds } = req.body; // Expecting a comma-separated string
+
+    if (!videoIds || typeof videoIds !== 'string') {
+      return res.status(400).json({ success: false, error: 'videoIds string is required' });
+    }
+
+    const ids = videoIds.split(',').map(id => id.trim()).filter(id => id);
+    if (ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'No valid video IDs provided' });
+    }
+
+    let successful = 0;
+    let failed = 0;
+    const results = [];
+
+    for (const videoId of ids) {
+      const result = await cloneVideo(videoId);
+      if (result.success) {
+        successful++;
+        results.push({ originalId: videoId, newId: result.newId, status: 'success' });
+      } else {
+        failed++;
+        results.push({ originalId: videoId, status: 'failed', error: result.error });
+      }
+      await delay(500); // Rate limiting
+    }
+
+    res.json({
+      success: true,
+      message: `Batch clone completed: ${successful} successful, ${failed} failed`,
+      stats: { successful, failed, total: ids.length },
+      results
+    });
+
+  } catch (error) {
+    log(`Batch clone error: ${error.message}`, 'ERROR');
+    res.status(500).json({ success: false, error: 'Batch clone failed', details: error.message });
+  }
+});
+
 // Enhanced Dashboard HTML
 app.get('/dashboard', (req, res) => {
   const { pass } = req.query;
@@ -1145,10 +1228,30 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
               <button class="btn btn-success" onclick="batchUpload()">📤 Start Batch Upload</button>
             </div>
 
-            <div>
+            <div style="margin-bottom: 30px;">
               <h4>💾 Get TUS Endpoint (for file uploads)</h4>
               <button class="btn" onclick="getTusEndpoint()">📋 Get Upload Endpoint</button>
               <div id="tusInfo" style="margin-top: 10px; padding: 10px; background: #f8fafc; border-radius: 8px; display: none;"></div>
+            </div>
+
+            <div style="margin-top: 30px;">
+              <h4>🔁 Clone Existing Video</h4>
+              <p style="color: #666; margin-bottom: 15px;">Create a copy of an existing video on the server using its ID.</p>
+              
+              <div style="margin-bottom: 30px;">
+                <h5>Single Clone</h5>
+                <div class="input-group">
+                  <input type="text" id="cloneVideoId" placeholder="Enter Video ID to clone">
+                  <button class="btn btn-warning" onclick="cloneSingleVideo(event)">🔁 Clone Video</button>
+                </div>
+              </div>
+
+              <div>
+                <h5>Batch Clone</h5>
+                <textarea id="batchCloneIds" rows="5" style="width: 100%; padding: 12px; border: 2px solid #e2e8f0; border-radius: 8px;" 
+                  placeholder="Enter multiple Video IDs, separated by commas"></textarea>
+                <button class="btn btn-warning" onclick="batchCloneVideos(event)">🔁 Start Batch Clone</button>
+              </div>
             </div>
           </div>
 
@@ -1838,6 +1941,81 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
           }
         }
 
+        // NEW: Clone a single video with enhanced feedback
+        async function cloneSingleVideo(event) {
+          const videoId = document.getElementById('cloneVideoId').value.trim();
+          if (!videoId) {
+            showAlert('Please enter a Video ID to clone.', 'danger');
+            return;
+          }
+
+          const button = event.target;
+          button.disabled = true;
+          button.textContent = '🔁 Cloning...';
+
+          try {
+            const response = await fetch('/api/video/clone', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ videoId })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+              showAlert(result.message, 'success');
+              document.getElementById('cloneVideoId').value = '';
+            } else {
+              const errorMessage = result.details || result.error;
+              showAlert('Clone failed: ' + errorMessage, 'danger');
+            }
+          } catch (error) {
+            showAlert('Clone error: ' + error.message, 'danger');
+          } finally {
+            button.disabled = false;
+            button.textContent = '🔁 Clone Video';
+          }
+        }
+
+        // NEW: Batch clone videos with enhanced feedback
+        async function batchCloneVideos(event) {
+          const videoIds = document.getElementById('batchCloneIds').value.trim();
+          if (!videoIds) {
+            showAlert('Please enter Video IDs for batch cloning.', 'danger');
+            return;
+          }
+
+          const button = event.target;
+          button.disabled = true;
+          button.textContent = '🔁 Cloning...';
+
+          try {
+            const response = await fetch('/api/video/clone/batch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ videoIds })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+              showAlert(result.message, 'success');
+              if (result.results) {
+                console.log('Batch Clone Results:', result.results);
+              }
+              document.getElementById('batchCloneIds').value = '';
+            } else {
+              const errorMessage = result.details || result.error;
+              showAlert('Batch clone failed: ' + errorMessage, 'danger');
+            }
+          } catch (error) {
+            showAlert('Batch clone error: ' + error.message, 'danger');
+          } finally {
+            button.disabled = false;
+            button.textContent = '🔁 Start Batch Clone';
+          }
+        }
+
         // Show alerts
         function showAlert(message, type) {
           const container = document.getElementById('alertContainer');
@@ -2341,7 +2519,8 @@ app.get('/api/status', (req, res) => {
       '🏷️ Auto Video Renaming with TMDB & IMDB Integration',
       '📊 Comprehensive Analytics Dashboard',
       '🎬 Enhanced Title Parsing (Multiple Formats)',
-      '🆔 IMDB ID Integration for Movies & TV Shows'
+      '🆔 IMDB ID Integration for Movies & TV Shows',
+      '🔁 Single & Batch Video Cloning'
     ],
     enhancements: [
       '🎯 Improved filename parsing for various formats',
@@ -2368,6 +2547,8 @@ app.get('/api/status', (req, res) => {
       'POST /api/duplicates/batch-delete': 'Batch delete videos',
       'POST /api/rename/batch': 'Start enhanced batch rename (TMDB + IMDB)',
       'GET /api/rename/progress': 'Rename progress',
+      'POST /api/video/clone': 'Clone a single video',
+      'POST /api/video/clone/batch': 'Clone multiple videos',
       'GET /api/dashboard/data': 'Dashboard data',
       'DELETE /api/requests/clear': 'Clear all requests'
     }
@@ -2388,7 +2569,8 @@ app.get('/', (req, res) => {
       '🏷️ Auto Video Renaming with TMDB & IMDB Integration',
       '📊 Comprehensive Analytics Dashboard',
       '🎬 Enhanced Multi-Format Title Parsing',
-      '🆔 IMDB ID Integration for Complete Metadata'
+      '🆔 IMDB ID Integration for Complete Metadata',
+      '🔁 Single & Batch Video Cloning'
     ],
     endpoints: [
       'GET /dashboard - Management Dashboard (Enhanced)',
@@ -2402,7 +2584,8 @@ app.get('/', (req, res) => {
       '🎨 Advanced quality tag and metadata removal',
       '🌐 Multi-language and dual audio support detection',
       '📝 Better handling of various filename separators and formats',
-      '🔍 Enhanced duplicate detection algorithms'
+      '🔍 Enhanced duplicate detection algorithms',
+      '🔁 Added video cloning functionality'
     ],
     supportedFormats: [
       '🎬 Movies: "Movie Title Year {TMDB_ID} {IMDB_ID}.mkv"',
@@ -2442,7 +2625,9 @@ app.use((req, res) => {
       '/api/duplicates/scan',
       '/api/duplicates/progress',
       '/api/rename/batch',
-      '/api/rename/progress'
+      '/api/rename/progress',
+      '/api/video/clone',
+      '/api/video/clone/batch'
     ]
   });
 });
@@ -2480,5 +2665,6 @@ app.listen(PORT, () => {
   log(`   🎯 Enhanced search with exact match and organization options`);
   log(`   🌐 Multi-format support: Vegamovies, BollyFlix, standard releases`);
   log(`   🏷️ Comprehensive quality and language tag handling`);
+  log(`   🔁 NEW: Single and Batch Video Cloning`);
   log(`🎉 Ready to process your video library with enhanced IMDB integration!`);
 });
