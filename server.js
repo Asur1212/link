@@ -35,7 +35,7 @@ const LOG_FILE = path.join(__dirname, 'server.log');
 // Global state
 let currentKeyIndex = 0;
 let ipTracker = {};
-let renameProgress = { running: false, current: 0, total: 0, status: '' };
+let renameProgress = { running: false, current: 0, total: 0, status: '', failures: [] };
 let uploadProgress = { running: false, current: 0, total: 0, status: '', uploads: [] };
 let duplicateProgress = { running: false, current: 0, total: 0, status: '', duplicates: [] };
 
@@ -99,7 +99,11 @@ const writeData = (data) => {
   }
 };
 
+// Normalization for exact matching (strips all special chars)
 const normalize = (str) => str?.toLowerCase().replace(/[^a-z0-9]/g, '') || '';
+
+// NEW: Normalization for title matching (keeps spaces)
+const normalizeTitle = (str) => str?.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim() || '';
 
 // Enhanced episode extraction
 const extractSeasonEpisode = (name = '') => {
@@ -975,7 +979,7 @@ app.get('/dashboard', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>StreamP2P Manager Dashboard v2.0 Enhanced</title>
+      <title>StreamP2P Manager Dashboard v2.1 Professional</title>
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -1122,6 +1126,10 @@ app.get('/dashboard', (req, res) => {
         .upload-status-card {
           border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; background: white;
         }
+        .rename-failure-item {
+            display: flex; flex-direction: column; gap: 10px; padding: 15px;
+            border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 10px;
+        }
         @media (max-width: 768px) {
           .container { padding: 10px; }
           .header h1 { font-size: 2rem; }
@@ -1135,7 +1143,7 @@ app.get('/dashboard', (req, res) => {
     <body>
       <div class="container">
         <div class="header">
-          <h1>🎬 StreamP2P Manager v2.0 Enhanced</h1>
+          <h1>🎬 StreamP2P Manager v2.1 Professional</h1>
           <p>Professional Content Management with Episode Organization, Duplicate Detection & IMDB Integration</p>
         </div>
 
@@ -1182,6 +1190,7 @@ app.get('/dashboard', (req, res) => {
                   <th style="padding: 12px; border-bottom: 2px solid #e2e8f0;">Count</th>
                   <th style="padding: 12px; border-bottom: 2px solid #e2e8f0;">Last Requested</th>
                   <th style="padding: 12px; border-bottom: 2px solid #e2e8f0;">Status</th>
+                  <th style="padding: 12px; border-bottom: 2px solid #e2e8f0;">Actions</th>
                 </tr>
               </thead>
               <tbody id="tableBody"></tbody>
@@ -1316,6 +1325,13 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
             </div>
             <div id="progressText">Initializing...</div>
           </div>
+
+          <div class="section" id="renameFailuresContainer" style="display: none;">
+            <h3>❌ Rename Failures</h3>
+            <p style="color: #666; margin-bottom: 15px;">The following videos could not be renamed automatically. You can correct them manually below.</p>
+            <div id="renameFailuresList"></div>
+            <button class="btn btn-warning" onclick="document.getElementById('renameFailuresContainer').style.display = 'none'">Clear Failures List</button>
+          </div>
         </div>
       </div>
 
@@ -1347,7 +1363,6 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
               allData = result.data;
               updateStats(result.stats);
               renderTable(allData);
-              showAlert('Data loaded successfully!', 'success');
             } else {
               showAlert('Failed to load data: ' + result.error, 'danger');
             }
@@ -1374,6 +1389,7 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
           
           data.forEach(item => {
             const row = tbody.insertRow();
+            row.id = \`request-\${item.tmdbId}\`;
             row.innerHTML = \`
               <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">\${item.tmdbId}</td>
               <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">\${item.title}</td>
@@ -1385,8 +1401,46 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
               <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">
                 <span class="status-badge status-completed">\${item.status || 'Requested'}</span>
               </td>
+              <td style="padding: 12px; border-bottom: 1px solid #e2e8f0;">
+                <button class="btn btn-small btn-danger" onclick="deleteRequest('\${item.tmdbId}', this)">🗑️ Delete</button>
+              </td>
             \`;
           });
+        }
+
+        // NEW: Delete a single request
+        async function deleteRequest(tmdbId, button) {
+            if (!confirm(\`Are you sure you want to delete the request for TMDB ID: \${tmdbId}?\`)) {
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = 'Deleting...';
+
+            try {
+                const response = await fetch(\`/api/requests/\${tmdbId}\`, { method: 'DELETE' });
+                const result = await response.json();
+
+                if (result.success) {
+                    showAlert('Request deleted successfully!', 'success');
+                    const row = document.getElementById(\`request-\${tmdbId}\`);
+                    if (row) {
+                        row.style.transition = 'opacity 0.5s';
+                        row.style.opacity = '0';
+                        setTimeout(() => row.remove(), 500);
+                    }
+                    // Optionally, reload all data to update stats
+                    loadData();
+                } else {
+                    showAlert('Failed to delete request: ' + result.error, 'danger');
+                    button.disabled = false;
+                    button.textContent = '🗑️ Delete';
+                }
+            } catch (error) {
+                showAlert('Error deleting request: ' + error.message, 'danger');
+                button.disabled = false;
+                button.textContent = '🗑️ Delete';
+            }
         }
 
         // Search functionality
@@ -2038,6 +2092,7 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
         async function startBatchRename() {
           if (confirm('This will rename all videos in StreamP2P with TMDB and IMDB IDs. Continue?')) {
             try {
+              document.getElementById('renameFailuresContainer').style.display = 'none';
               const response = await fetch('/api/rename/batch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
@@ -2079,7 +2134,10 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
                   setTimeout(() => {
                     document.getElementById('progressContainer').style.display = 'none';
                   }, 3000);
-                  showAlert('Enhanced batch rename completed with IMDB IDs!', 'success');
+                  showAlert('Enhanced batch rename completed!', 'success');
+                  if (progress.failures && progress.failures.length > 0) {
+                    displayRenameFailures(progress.failures);
+                  }
                 }
               }
             } catch (error) {
@@ -2087,6 +2145,67 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
               showAlert('Progress tracking error: ' + error.message, 'danger');
             }
           }, 2000);
+        }
+
+        // NEW: Display rename failures
+        function displayRenameFailures(failures) {
+            const container = document.getElementById('renameFailuresContainer');
+            const list = document.getElementById('renameFailuresList');
+            list.innerHTML = '';
+
+            failures.forEach(failure => {
+                const item = document.createElement('div');
+                item.className = 'rename-failure-item';
+                item.id = \`failure-\${failure.id}\`;
+                item.innerHTML = \`
+                    <div>
+                        <strong>Original Name:</strong>
+                        <p style="font-family: monospace; background: #f1f1f1; padding: 5px; border-radius: 4px;">\${failure.name}</p>
+                    </div>
+                    <div class="input-group">
+                        <input type="text" id="newName-\${failure.id}" placeholder="Enter new name...">
+                        <button class="btn btn-small btn-warning" onclick="manualRename('\${failure.id}', this)">🏷️ Rename</button>
+                    </div>
+                \`;
+                list.appendChild(item);
+            });
+
+            container.style.display = 'block';
+        }
+
+        // NEW: Manual rename function
+        async function manualRename(videoId, button) {
+            const newName = document.getElementById(\`newName-\${videoId}\`).value.trim();
+            if (!newName) {
+                showAlert('Please enter a new name.', 'danger');
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = 'Renaming...';
+
+            try {
+                const response = await fetch('/api/rename/manual', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ videoId, newName })
+                });
+                const result = await response.json();
+
+                if (result.success) {
+                    showAlert('Video renamed successfully!', 'success');
+                    const item = document.getElementById(\`failure-\${videoId}\`);
+                    item.innerHTML = \`<div class="alert alert-success">✅ Renamed successfully to: \${newName}</div>\`;
+                } else {
+                    showAlert('Rename failed: ' + result.error, 'danger');
+                    button.disabled = false;
+                    button.textContent = '🏷️ Rename';
+                }
+            } catch (error) {
+                showAlert('Error during manual rename: ' + error.message, 'danger');
+                button.disabled = false;
+                button.textContent = '🏷️ Rename';
+            }
         }
 
         // Clear all requests
@@ -2168,7 +2287,7 @@ const getTusEndpoint = async () => {
   }
 };
 
-// Stream matching endpoint (existing)
+// FIXED: Stream matching endpoint
 app.get('/api/stream/match', async (req, res) => {
   try {
     const { slug, tmdbId } = req.query;
@@ -2176,28 +2295,45 @@ app.get('/api/stream/match', async (req, res) => {
       return res.status(400).json({ error: 'Missing slug parameter' });
     }
 
-    const { title, season, episode } = parseSlugParts(slug);
+    const { title, season, episode } = parseSlug(slug);
     
     log(`Stream match request: "${slug}" → "${title}" S${season || 'null'}E${episode || 'null'}, TMDB: ${tmdbId}`);
 
-    const allVideos = await searchAllVideos(title);
-    const normalizedSlug = normalize(title);
+    // Search using a simplified version of the title for broader results
+    const searchTitle = title.split(' ')[0];
+    const allVideos = await searchAllVideos(searchTitle);
+    const normalizedRequestTitle = normalizeTitle(title);
 
     const match = allVideos.find(item => {
-      const filename = item.name.toLowerCase();
+      const filename = item.name;
       const { season: fileSeason, episode: fileEpisode } = extractSeasonEpisode(filename);
-      const normalizedFilename = normalize(filename);
-
-      const hasTMDB = tmdbId && filename.includes(`{${tmdbId}}`);
-      const seasonMatch = season && fileSeason && season === fileSeason.toString().padStart(2, '0');
-      const episodeMatch = episode && fileEpisode && episode === fileEpisode.toString().padStart(2, '0');
-
-      if (hasTMDB && season && episode) {
-        return seasonMatch && episodeMatch;
+      
+      // Priority 1: Exact TMDB ID match
+      if (tmdbId && filename.includes(`{${tmdbId}}`)) {
+        if (season && episode) { // For series, also match season and episode
+            const seasonMatch = fileSeason && season === fileSeason.toString().padStart(2, '0');
+            const episodeMatch = episode && fileEpisode && episode === fileEpisode.toString().padStart(2, '0');
+            return seasonMatch && episodeMatch;
+        }
+        return true; // For movies, TMDB ID is enough
       }
 
-      const titleMatch = normalizedFilename.includes(normalizedSlug);
-      return titleMatch && (!season || seasonMatch) && (!episode || episodeMatch);
+      // Priority 2: Normalized title match
+      const fileInfo = parseVideoTitle(filename);
+      const normalizedFileTitle = normalizeTitle(fileInfo.title);
+      
+      const titleMatch = normalizedFileTitle === normalizedRequestTitle;
+
+      if (titleMatch) {
+         if (season && episode) { // For series
+            const seasonMatch = fileSeason && season === fileSeason.toString().padStart(2, '0');
+            const episodeMatch = episode && fileEpisode && episode === fileEpisode.toString().padStart(2, '0');
+            return seasonMatch && episodeMatch;
+         }
+         return true; // For movies
+      }
+      
+      return false;
     });
 
     if (match) {
@@ -2227,18 +2363,28 @@ app.get('/api/stream/match', async (req, res) => {
   }
 });
 
-const parseSlugParts = (slug = '') => {
-  const parts = slug.toLowerCase().split('/');
-  const title = parts[0]?.replace(/-/g, ' ') || '';
-
-  const seasonMatch = slug.match(/season-?(\d+)/i);
-  const episodeMatch = slug.match(/episode-?(\d+)/i);
-
+// FIXED: More robust slug parsing
+const parseSlug = (slug = '') => {
+  const seasonMatch = slug.match(/\/season-(\d+)/);
+  const episodeMatch = slug.match(/\/episode-(\d+)/);
+  
   const season = seasonMatch ? seasonMatch[1].padStart(2, '0') : null;
   const episode = episodeMatch ? episodeMatch[1].padStart(2, '0') : null;
 
+  let title = slug;
+  if (seasonMatch) {
+    title = title.substring(0, seasonMatch.index);
+  } else if (episodeMatch) {
+    // Handle cases where only episode is present
+    title = title.substring(0, episodeMatch.index);
+  }
+  
+  // Remove trailing slashes and replace hyphens
+  title = title.replace(/\/$/, '').replace(/-/g, ' ').trim();
+
   return { title, season, episode };
 };
+
 
 // Upload from URL endpoint
 app.post('/api/upload/url', async (req, res) => {
@@ -2376,24 +2522,23 @@ app.post('/api/rename/batch', async (req, res) => {
   }
 
   try {
-    renameProgress = { running: true, current: 0, total: 0, status: 'Starting enhanced rename with IMDB integration...' };
+    renameProgress = { running: true, current: 0, total: 0, status: 'Starting enhanced rename...', failures: [] };
     
     res.json({ 
       success: true, 
-      message: 'Enhanced batch rename started with IMDB ID support. Check progress via /api/rename/progress' 
+      message: 'Enhanced batch rename started. Check progress via /api/rename/progress' 
     });
 
     const videos = await fetchAllVideos();
     renameProgress.total = videos.length;
-    renameProgress.status = 'Processing videos with enhanced parsing...';
+    renameProgress.status = 'Processing videos...';
 
-    let count = { renamed: 0, skipped: 0, notFound: 0, errors: 0 };
+    let count = { renamed: 0, skipped: 0, errors: 0 };
 
     for (const video of videos) {
       renameProgress.current++;
       renameProgress.status = `Processing: ${video.name}`;
 
-      // Skip if already has both TMDB and IMDB IDs
       if (/\{\d+\}.*\{tt\d+\}/.test(video.name) || /\{tt\d+\}.*\{\d+\}/.test(video.name)) {
         count.skipped++;
         continue;
@@ -2401,14 +2546,16 @@ app.post('/api/rename/batch', async (req, res) => {
 
       const info = parseVideoTitle(video.name);
       if (!info.title) {
-        count.notFound++;
+        count.errors++;
+        renameProgress.failures.push({ id: video.id, name: video.name, reason: 'Could not parse title' });
         continue;
       }
 
       try {
         const tmdb = await searchTMDB(info);
         if (!tmdb) {
-          count.notFound++;
+          count.errors++;
+          renameProgress.failures.push({ id: video.id, name: video.name, reason: 'TMDB/IMDB info not found' });
           continue;
         }
 
@@ -2416,41 +2563,60 @@ app.post('/api/rename/batch', async (req, res) => {
         const s = info.season?.toString().padStart(2, '0');
         const e = info.episode?.toString().padStart(2, '0');
         
+        const imdbPart = tmdb.imdbId ? ` {${tmdb.imdbId}}` : '';
         if (info.isSeries) {
-          // Series format: Series Name S01-E01-Episode Title {TMDB_ID} {IMDB_ID}.mkv
-          const imdbPart = tmdb.imdbId ? ` {${tmdb.imdbId}}` : '';
           newName = `${tmdb.seriesName} S${s}-E${e}-${tmdb.episodeName} {${tmdb.tmdbId}}${imdbPart}.mkv`;
         } else {
-          // Movie format: Movie Title Year {TMDB_ID} {IMDB_ID}.mkv
-          const imdbPart = tmdb.imdbId ? ` {${tmdb.imdbId}}` : '';
           newName = `${tmdb.title} ${tmdb.year} {${tmdb.tmdbId}}${imdbPart}.mkv`;
         }
 
         const success = await renameVideo(video.id, newName);
         if (success) {
           count.renamed++;
-          log(`Enhanced rename success: ${newName}`);
         } else {
           count.errors++;
+          renameProgress.failures.push({ id: video.id, name: video.name, reason: 'API rename failed' });
         }
         
       } catch (tmdbError) {
         log(`TMDB/IMDB lookup error for ${video.name}: ${tmdbError.message}`, 'ERROR');
         count.errors++;
+        renameProgress.failures.push({ id: video.id, name: video.name, reason: 'TMDB/IMDB API error' });
       }
       
-      await delay(200); // Rate limiting for API calls
+      await delay(200);
     }
 
     renameProgress.running = false;
-    renameProgress.status = `Enhanced rename completed: ${count.renamed} renamed (with IMDB), ${count.skipped} skipped, ${count.notFound} not found, ${count.errors} errors`;
-    log(`Enhanced batch rename completed: ${JSON.stringify(count)}`);
+    renameProgress.status = `Completed: ${count.renamed} renamed, ${count.skipped} skipped, ${count.errors} errors`;
+    log(`Batch rename completed: ${JSON.stringify(count)}`);
 
   } catch (error) {
     renameProgress.running = false;
-    renameProgress.status = `Enhanced rename error: ${error.message}`;
-    log(`Enhanced batch rename error: ${error.message}`, 'ERROR');
+    renameProgress.status = `Error: ${error.message}`;
+    log(`Batch rename error: ${error.message}`, 'ERROR');
   }
+});
+
+// NEW: Manual rename endpoint
+app.post('/api/rename/manual', async (req, res) => {
+    try {
+        const { videoId, newName } = req.body;
+        if (!videoId || !newName) {
+            return res.status(400).json({ success: false, error: 'videoId and newName are required' });
+        }
+
+        const success = await renameVideo(videoId, newName);
+
+        if (success) {
+            res.json({ success: true, message: 'Video renamed successfully' });
+        } else {
+            res.status(500).json({ success: false, error: 'Failed to rename video via API' });
+        }
+    } catch (error) {
+        log(`Manual rename error: ${error.message}`, 'ERROR');
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
 });
 
 // Rename progress endpoint
@@ -2466,7 +2632,7 @@ app.get('/api/dashboard/data', (req, res) => {
       totalRequests: data.length,
       totalCount: data.reduce((sum, item) => sum + item.count, 0),
       movieRequests: data.filter(item => item.type === 'movie').length,
-      seriesRequests: data.filter(item => item.type === 'tv').length
+      seriesRequests: data.filter(item => item.type === 'tv' || item.type === 'series').length
     };
 
     res.json({
@@ -2480,6 +2646,27 @@ app.get('/api/dashboard/data', (req, res) => {
       error: 'Failed to fetch dashboard data' 
     });
   }
+});
+
+// NEW: Delete single request endpoint
+app.delete('/api/requests/:tmdbId', (req, res) => {
+    try {
+        const { tmdbId } = req.params;
+        let data = readData();
+        const initialLength = data.length;
+        data = data.filter(item => item.tmdbId.toString() !== tmdbId.toString());
+
+        if (data.length < initialLength) {
+            writeData(data);
+            log(`Request deleted: TMDB ID ${tmdbId}`);
+            res.json({ success: true, message: 'Request deleted successfully' });
+        } else {
+            res.status(404).json({ success: false, error: 'Request not found' });
+        }
+    } catch (error) {
+        log(`Delete request error: ${error.message}`, 'ERROR');
+        res.status(500).json({ success: false, error: 'Failed to delete request' });
+    }
 });
 
 // Clear requests endpoint
@@ -2500,7 +2687,7 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
-    version: '2.0.0-enhanced'
+    version: '2.1.0-professional'
   });
 });
 
@@ -2508,8 +2695,8 @@ app.get('/health', (req, res) => {
 app.get('/api/status', (req, res) => {
   res.json({
     success: true,
-    server: 'StreamP2P Manager Enhanced',
-    version: '2.0.0-enhanced',
+    server: 'StreamP2P Manager Professional',
+    version: '2.1.0-professional',
     uptime: process.uptime(),
     features: [
       '🔍 Advanced Video Search with Episode Organization',
@@ -2520,21 +2707,16 @@ app.get('/api/status', (req, res) => {
       '📊 Comprehensive Analytics Dashboard',
       '🎬 Enhanced Title Parsing (Multiple Formats)',
       '🆔 IMDB ID Integration for Movies & TV Shows',
-      '🔁 Single & Batch Video Cloning'
-    ],
-    enhancements: [
-      '🎯 Improved filename parsing for various formats',
-      '🔗 TMDB + IMDB ID integration in renaming',
-      '📺 Better series episode detection',
-      '🎨 Enhanced quality tag removal',
-      '🌐 Multi-language support detection'
+      '🔁 Single & Batch Video Cloning',
+      '🗑️ Single Request Deletion from Dashboard',
+      '🛠️ Manual Rename for Failed Items'
     ],
     endpoints: {
       'GET /': 'Server status',
       'GET /health': 'Health check',
       'GET /dashboard': 'Management dashboard',
       'GET /api/stream/search': 'Search all videos (with organize option)',
-      'GET /api/stream/match': 'Find stream by slug',
+      'GET /api/stream/match': 'Find stream by slug (FIXED)',
       'POST /api/request': 'Submit content request',
       'POST /api/upload/url': 'Upload from URL/torrent',
       'POST /api/upload/batch': 'Batch upload from URLs',
@@ -2546,11 +2728,13 @@ app.get('/api/status', (req, res) => {
       'DELETE /api/duplicates/delete/:videoId': 'Delete specific video',
       'POST /api/duplicates/batch-delete': 'Batch delete videos',
       'POST /api/rename/batch': 'Start enhanced batch rename (TMDB + IMDB)',
+      'POST /api/rename/manual': 'Manually rename a single video (NEW)',
       'GET /api/rename/progress': 'Rename progress',
       'POST /api/video/clone': 'Clone a single video',
       'POST /api/video/clone/batch': 'Clone multiple videos',
       'GET /api/dashboard/data': 'Dashboard data',
-      'DELETE /api/requests/clear': 'Clear all requests'
+      'DELETE /api/requests/clear': 'Clear all requests',
+      'DELETE /api/requests/:tmdbId': 'Delete a single request (NEW)'
     }
   });
 });
@@ -2558,41 +2742,13 @@ app.get('/api/status', (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    message: '🎬 StreamP2P Manager Server v2.0 Enhanced',
-    version: '2.0.0-enhanced',
+    message: '🎬 StreamP2P Manager Server v2.1 Professional',
+    version: '2.1.0-professional',
     status: 'Running',
-    features: [
-      '🔍 Advanced Video Search with Episode Organization',
-      '📤 Enhanced URL/Torrent Upload with Real-time Status',
-      '📝 Optimized Batch Upload Support',
-      '🔄 Duplicate Detection & Management',
-      '🏷️ Auto Video Renaming with TMDB & IMDB Integration',
-      '📊 Comprehensive Analytics Dashboard',
-      '🎬 Enhanced Multi-Format Title Parsing',
-      '🆔 IMDB ID Integration for Complete Metadata',
-      '🔁 Single & Batch Video Cloning'
-    ],
-    endpoints: [
-      'GET /dashboard - Management Dashboard (Enhanced)',
-      'GET /api/status - Server Status',
-      'GET /health - Health Check'
-    ],
-    newEnhancements: [
-      '🎯 Enhanced filename parsing for multiple formats (Vegamovies, BollyFlix, etc.)',
-      '🔗 TMDB + IMDB ID integration in file renaming',
-      '📺 Improved series episode detection and organization',
-      '🎨 Advanced quality tag and metadata removal',
-      '🌐 Multi-language and dual audio support detection',
-      '📝 Better handling of various filename separators and formats',
-      '🔍 Enhanced duplicate detection algorithms',
-      '🔁 Added video cloning functionality'
-    ],
-    supportedFormats: [
-      '🎬 Movies: "Movie Title Year {TMDB_ID} {IMDB_ID}.mkv"',
-      '📺 Series: "Series Name S01-E01-Episode Title {TMDB_ID} {IMDB_ID}.mkv"',
-      '📱 Multiple input formats: Vegamovies, BollyFlix, standard releases',
-      '🔧 Quality tags: 1080p, 720p, BluRay, WEB-DL, etc.',
-      '🌐 Language tags: Hindi, English, Dual Audio, etc.'
+    newFeatures: [
+      '🎯 Fixed stream matching for titles with special characters',
+      '🗑️ Added single request deletion from the dashboard',
+      '🛠️ Added manual rename interface for failed batch renames'
     ]
   });
 });
@@ -2612,29 +2768,13 @@ app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: 'Endpoint not found',
-    path: req.path,
-    availableEndpoints: [
-      '/dashboard',
-      '/api/status',
-      '/health',
-      '/api/stream/search',
-      '/api/stream/match',
-      '/api/upload/url',
-      '/api/upload/batch',
-      '/api/upload/progress',
-      '/api/duplicates/scan',
-      '/api/duplicates/progress',
-      '/api/rename/batch',
-      '/api/rename/progress',
-      '/api/video/clone',
-      '/api/video/clone/batch'
-    ]
+    path: req.path
   });
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-  log('Enhanced StreamP2P Manager shutting down gracefully...');
+  log('StreamP2P Manager shutting down gracefully...');
   if (progressInterval) clearInterval(progressInterval);
   if (uploadInterval) clearInterval(uploadInterval);
   if (duplicateInterval) clearInterval(duplicateInterval);
@@ -2652,19 +2792,12 @@ process.on('uncaughtException', (error) => {
 
 // Start server
 app.listen(PORT, () => {
-  log(`🚀 StreamP2P Manager v2.0 Enhanced running on http://localhost:${PORT}`);
+  log(`🚀 StreamP2P Manager v2.1 Professional running on http://localhost:${PORT}`);
   log(`📊 Dashboard: http://localhost:${PORT}/dashboard?pass=${CONFIG.DASHBOARD_PASSWORD}`);
   log(`🔧 API Status: http://localhost:${PORT}/api/status`);
-  log(`✨ Enhanced Features:`);
-  log(`   🎬 Advanced filename parsing for multiple formats`);
-  log(`   🆔 TMDB + IMDB ID integration in renaming`);
-  log(`   📺 Series episodes organized by season and episode order`);
-  log(`   ❌ Missing episode detection with TMDB verification`);
-  log(`   🔍 Advanced duplicate detection and bulk deletion`);
-  log(`   📊 Real-time upload task status monitoring`);
-  log(`   🎯 Enhanced search with exact match and organization options`);
-  log(`   🌐 Multi-format support: Vegamovies, BollyFlix, standard releases`);
-  log(`   🏷️ Comprehensive quality and language tag handling`);
-  log(`   🔁 NEW: Single and Batch Video Cloning`);
-  log(`🎉 Ready to process your video library with enhanced IMDB integration!`);
+  log(`✨ NEW Features & Fixes:`);
+  log(`   🎯 FIXED: Stream matching for titles like 'Ginny & Georgia'`);
+  log(`   🗑️ NEW: Delete single requests directly from the dashboard`);
+  log(`   🛠️ NEW: Manually correct and rename files that failed the batch process`);
+  log(`🎉 Your professional media management server is ready!`);
 });
