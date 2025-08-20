@@ -102,24 +102,32 @@ const writeData = (data) => {
 // Normalization for exact matching (strips all special chars)
 const normalize = (str) => str?.toLowerCase().replace(/[^a-z0-9]/g, '') || '';
 
-// NEW: Normalization for title matching (keeps spaces)
+// Normalization for title matching (keeps spaces)
 const normalizeTitle = (str) => str?.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim() || '';
 
 // Enhanced episode extraction
 const extractSeasonEpisode = (name = '') => {
   const patterns = [
-    /s(\d{1,2})[.\-_\s]?e(\d{1,2})/i,
-    /season[\s\-_]*(\d{1,2})[\s\-_]*episode[\s\-_]*(\d{1,2})/i,
-    /(\d{1,2})x(\d{1,2})/i
+    /s(\d{1,2})[.\-_\s]?e(\d{1,3})/i, // Supports E01 to E999
+    /season[\s\-_]*(\d{1,2})[\s\-_]*episode[\s\-_]*(\d{1,3})/i,
+    /(\d{1,2})x(\d{1,3})/i,
+    /ep[\s\-_]*(\d{1,3})/i // For formats like "Ep 5"
   ];
 
   for (const pattern of patterns) {
     const match = name.match(pattern);
     if (match) {
-      return {
-        season: parseInt(match[1]),
-        episode: parseInt(match[2])
-      };
+        if (match.length === 3) { // s01e01, 1x01 format
+             return {
+                season: parseInt(match[1]),
+                episode: parseInt(match[2])
+            };
+        } else if (match.length === 2) { // ep 01 format (no season)
+            return {
+                season: null,
+                episode: parseInt(match[1])
+            }
+        }
     }
   }
   return { season: null, episode: null };
@@ -371,72 +379,154 @@ const findDuplicates = (videos) => {
   return Object.values(duplicates);
 };
 
-// Enhanced clean title function that handles more formats
-const cleanTitle = (raw) => {
-  return raw
-    // Remove file extension
-    .replace(/\.[^.]+$/, '')
-    // Remove existing TMDB/IMDB IDs
-    .replace(/\{[^}]+\}/g, '')
-    // Remove brackets, parentheses with various content
+// ===================================================================
+// START: REWRITTEN PARSING AND CLEANING LOGIC
+// ===================================================================
+
+/**
+ * Cleans a title string by removing common junk keywords and formatting.
+ * This function is designed to be called AFTER the title has been extracted.
+ * @param {string} title - The raw title to clean.
+ * @returns {string} - The cleaned title.
+ */
+const cleanTitle = (title) => {
+  if (!title) return '';
+
+  // Comprehensive list of junk keywords and patterns to remove
+  const junkRegex = new RegExp([
+    // Quality and resolution
+    '4k', 'uhd', '2160p', '1080p', '720p', '480p', 'hd',
+    // Source and rip type
+    'blu-ray', 'bluray', 'brrip', 'bdrip', 'web-dl', 'webrip', 'web', 'hdrip', 'dvdrip',
+    'hdts', 'hdcam', 'camrip', 'predvdrip', 'hdtc', 'amzn', 'nf', 'hbo',
+    // Video and audio codecs
+    'x264', 'h264', 'x265', 'h265', 'hevc', 'avc', '10bit', '8bit',
+    'dts-hd', 'dts', 'ac3', 'dd5.1', 'ddp 5.1', 'aac', 'mp3',
+    // Audio and subtitle language/info
+    'dual audio', 'dual-audio', 'multi-audio', 'hindi', 'english', 'tamil', 'telugu',
+    'malayalam', 'kannada', 'japanese', 'chinese', 'korean', 'french', 'spanish', 'norwegian',
+    'italian', 'punjabi', 'bengali', 'dubbed', 'org', 'esub', 'esubs', 'msub', 'msubs', 'hc-esub', 'hc-sub',
+    // Release groups and websites
+    'bollyflix', 'moviesmod', 'themoviesflix', 'moonflix', 'vegamovies', '1337x',
+    'yify', 'yts', 'rarbg', 'torrent', 'uncut', 'unrated', 'extended', 'remastered',
+    'special edition', 'x-rated', 'reloaded version',
+    // Common file extensions and domains (as words)
+    'mkv', 'mp4', 'avi', 'com', 'in', 'net', 'org', 'email'
+  ].join('|'), 'gi');
+
+  return title
+    // Remove content in brackets and curly braces (often junk)
     .replace(/\[[^\]]+\]/g, '')
-    .replace(/\([^)]+\)/g, '')
-    // Remove quality indicators, codecs, and other metadata
-    .replace(/\b(1080p|720p|480p|2160p|4K|UHD|BluRay|WEBRip|WEB-DL|HDRip|BRRip|DVDRip|CAMRip|HDCAM|TS|TC|x264|x265|H\.264|H\.265|HEVC|AVC|DD5\.1|DTS|AC3|AAC|MP3|ESub|Esubs|MSub|MSubs|Hindi|English|Tamil|Telugu|Malayalam|Kannada|Dual\s+Audio|Multi\s+Audio|NF|Netflix|Amazon|Hotstar|ZEE5|SonyLIV|BollyFlix|MoonFlix|Vegamovies|10bit|8bit|HDR|SDR|UNRATED|EXTENDED|REMASTERED|IMAX|HQ|LQ|RARBG|YTS|YIFY|torrent|BluRay)\b/gi, '')
-    // Remove website names and tags
-    .replace(/\b(is|in|com|net|org|co|me|tv|to|cc|xyz|club)\b/gi, '')
-    // Clean up separators
-    .replace(/[._\-\+\=\~\!\@\#\$\%\^\&\*\(\)\[\]\{\}\\\/\|\;\:\'\"\<\>\,\?]+/g, ' ')
-    // Remove multiple spaces
+    .replace(/\{[^}]+\}/g, '')
+    // Remove the junk keywords
+    .replace(junkRegex, '')
+    // Replace dots, underscores, and other separators with spaces
+    .replace(/[._\-]+/g, ' ')
+    // Remove any remaining parentheses that are now empty or contain only spaces
+    .replace(/\(\s*\)/g, '')
+    // Collapse multiple spaces into one
     .replace(/\s+/g, ' ')
     .trim();
 };
 
-// Enhanced video title parsing that handles multiple formats
+/**
+ * A much more robust function to parse a video filename into its components.
+ * It intelligently finds series/episode or year information first, then cleans the title.
+ * @param {string} filename - The full filename (e.g., "Movie.Title.2023.1080p.mkv").
+ * @returns {object} - An object with title, year, isSeries, season, and episode.
+ */
 const parseVideoTitle = (filename) => {
-  const cleaned = cleanTitle(filename);
+  // Start with the raw filename, remove extension
+  let raw = filename.replace(/\.[^.]+$/, '');
 
-  // Series patterns - more comprehensive
+  // Handle "AKA" (Also Known As) by taking only the first part
+  raw = raw.split(/\sAKA\s/i)[0];
+
+  // --- 1. Attempt to parse as a Series ---
   const seriesPatterns = [
-    /(.+?)\s*[Ss](\d{1,2})[.\-_\s]*[Ee](\d{1,2})/,  // S01E01, S1E1, s01e01
-    /(.+?)\s*[Ss](\d{1,2})[.\-_\s]*E(\d{1,2})/,     // S01.E01
-    /(.+?)\s*Season\s*(\d{1,2})\s*Episode\s*(\d{1,2})/i,  // Season 1 Episode 1
-    /(.+?)\s*(\d{1,2})x(\d{1,2})/,                   // 1x01
-    /(.+?)\s*S(\d{1,2})E(\d{1,2})/i                  // S1E1
+    // Standard: S01E01, S01.E01, S01_E01
+    /(.*?)[ \._-]?s(\d{1,2})[ \._-]?e(\d{1,3})/i,
+    // Spelled out: Season 01 Episode 01
+    /(.*?)season[ \._-]?(\d{1,2})[ \._-]?episode[ \._-]?(\d{1,3})/i,
+    // Cross format: 1x01
+    /(.*?)(\d{1,2})x(\d{1,3})/i,
+    // Simple episode format: Ep 01, Episode 1 (often no season info)
+    /(.*?)[ \._-]?(?:ep|episode)[ \._-]?(\d{1,3})/i
   ];
 
   for (const pattern of seriesPatterns) {
-    const seriesMatch = cleaned.match(pattern);
-    if (seriesMatch) {
-      return {
-        title: seriesMatch[1].trim(),
-        isSeries: true,
-        season: parseInt(seriesMatch[2]),
-        episode: parseInt(seriesMatch[3])
-      };
+    const match = raw.match(pattern);
+    if (match) {
+      // For patterns like S01E01 or 1x01
+      if (match.length === 4) {
+        return {
+          title: cleanTitle(match[1]),
+          year: null,
+          isSeries: true,
+          season: parseInt(match[2]),
+          episode: parseInt(match[3])
+        };
+      }
+      // For patterns like "Ep 01"
+      if (match.length === 3) {
+        const titleCandidate = cleanTitle(match[1]);
+        // Check if the title has a year, which might indicate the season
+        const yearMatch = titleCandidate.match(/\b((?:19|20)\d{2})\b/);
+        return {
+          title: titleCandidate.replace(/\b((?:19|20)\d{2})\b/, '').trim(),
+          year: null,
+          isSeries: true,
+          season: yearMatch ? parseInt(yearMatch[1]) : 1, // Default to season 1 if no year found
+          episode: parseInt(match[2])
+        };
+      }
     }
   }
 
-  // Movie patterns - extract year if present
-  const movieYearPattern = /(.+?)\s+(\d{4})\b/;
-  const movieMatch = cleaned.match(movieYearPattern);
+  // --- 2. Attempt to parse as a Movie (by finding a year) ---
+  // Regex to find a 4-digit year (19xx or 20xx) surrounded by separators or in parentheses
+  const yearPattern = /(.*?)[ \._-]?\(?((?:19|20)\d{2})\)?/;
+  const yearMatch = raw.match(yearPattern);
 
-  if (movieMatch) {
-    return {
-      title: movieMatch[1].trim(),
-      year: movieMatch[2],
-      isSeries: false
-    };
+  if (yearMatch) {
+    // Check if the year is not part of a longer number (like a version)
+    const potentialYear = yearMatch[2];
+    const textAfterYear = raw.substring(yearMatch[0].length);
+    
+    // A simple heuristic: if the text after the year starts with a number, it might not be the release year.
+    // This is imperfect but helps avoid grabbing years from titles like "2001 A Space Odyssey".
+    // A better approach is to assume the *last* such match is the year.
+    const allYearMatches = [...raw.matchAll(/\b((?:19|20)\d{2})\b/g)];
+    if (allYearMatches.length > 0) {
+        const lastMatch = allYearMatches[allYearMatches.length - 1];
+        const year = lastMatch[1];
+        const title = raw.substring(0, lastMatch.index);
+        return {
+            title: cleanTitle(title),
+            year: parseInt(year),
+            isSeries: false,
+            season: null,
+            episode: null
+        };
+    }
   }
 
-  // Fallback - just the cleaned title
+  // --- 3. Fallback: Treat the whole thing as a movie title with no year ---
   return {
-    title: cleaned,
-    isSeries: false
+    title: cleanTitle(raw),
+    year: null,
+    isSeries: false,
+    season: null,
+    episode: null
   };
 };
 
-// NEW: Get IMDB ID from TMDB ID
+// ===================================================================
+// END: REWRITTEN PARSING AND CLEANING LOGIC
+// ===================================================================
+
+
+// Get IMDB ID from TMDB ID
 const getIMDBId = async (tmdbId, type) => {
   try {
     const endpoint = type === 'tv' ? 'tv' : 'movie';
@@ -467,10 +557,15 @@ const searchTMDB = async (info) => {
     const results = response.data.results;
     if (!results || results.length === 0) return null;
 
-    const bestMatch = results.find(r => {
-      const title = (r.title || r.name || '').toLowerCase();
-      return title.includes(info.title.toLowerCase());
-    }) || results[0];
+    // Improved matching: prioritize exact title matches
+    const normalizedInfoTitle = info.title.toLowerCase();
+    let bestMatch = results.find(r => (r.title || r.name || '').toLowerCase() === normalizedInfoTitle);
+    if (!bestMatch) {
+        bestMatch = results.find(r => (r.title || r.name || '').toLowerCase().includes(normalizedInfoTitle));
+    }
+    if (!bestMatch) {
+        bestMatch = results[0];
+    }
 
     // Get IMDB ID
     const imdbId = await getIMDBId(bestMatch.id, type);
@@ -510,7 +605,7 @@ const searchTMDB = async (info) => {
       };
     }
   } catch (error) {
-    log(`TMDB search error: ${error.message}`, 'ERROR');
+    log(`TMDB search error for "${info.title}": ${error.message}`, 'ERROR');
     return null;
   }
 };
@@ -979,7 +1074,7 @@ app.get('/dashboard', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>StreamP2P Manager Dashboard v2.1 Professional</title>
+      <title>StreamP2P Manager Dashboard v2.2 Professional</title>
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -1143,8 +1238,8 @@ app.get('/dashboard', (req, res) => {
     <body>
       <div class="container">
         <div class="header">
-          <h1>🎬 StreamP2P Manager v2.1 Professional</h1>
-          <p>Professional Content Management with Episode Organization, Duplicate Detection & IMDB Integration</p>
+          <h1>🎬 StreamP2P Manager v2.2 Professional</h1>
+          <p>Professional Content Management with Improved Renaming, Episode Organization, Duplicate Detection & IMDB Integration</p>
         </div>
 
         <div class="tabs">
@@ -1311,10 +1406,10 @@ magnet:?xt=urn:btih:abc123|Series S01E01"></textarea>
             </div>
             
             <div class="alert alert-info" style="margin-top: 20px;">
-              <strong>🎬 Enhanced Rename Feature:</strong> Now includes IMDB ID integration!<br>
+              <strong>🎬 Enhanced Rename Feature:</strong> Now includes IMDB ID integration and vastly improved title parsing!<br>
               <strong>Movies:</strong> Movie Title Year {TMDB_ID} {IMDB_ID}.mkv<br>
               <strong>Series:</strong> Series Name S01-E01-Episode Title {TMDB_ID} {IMDB_ID}.mkv<br>
-              <strong>Supported formats:</strong> Multiple quality tags, dual audio, various separators and more!
+              <strong>Supported formats:</strong> Handles complex filenames with junk tags, various separators, and more!
             </div>
           </div>
 
@@ -2287,69 +2382,103 @@ const getTusEndpoint = async () => {
   }
 };
 
-// FIXED: Stream matching endpoint
+// ===================================================================
+// START: REWRITTEN AND FIXED MATCHING ENDPOINT
+// ===================================================================
 app.get('/api/stream/match', async (req, res) => {
   try {
     const { slug, tmdbId } = req.query;
-    if (!slug) {
-      return res.status(400).json({ error: 'Missing slug parameter' });
+    if (!slug && !tmdbId) {
+      return res.status(400).json({ success: false, error: 'Missing slug or tmdbId parameter' });
     }
 
-    const { title, season, episode } = parseSlug(slug);
+    let candidateVideos = [];
+
+    // --- Path 1: The Golden Path via TMDB ID (Highest Accuracy) ---
+    // If a tmdbId is provided, we search for it directly. This is the most reliable method.
+    if (tmdbId) {
+      log(`Stream match: Starting search with TMDB ID: ${tmdbId}`);
+      candidateVideos = await searchAllVideos(`{${tmdbId}}`);
+    }
+
+    // --- Path 2: Fallback to Title Search ---
+    // If the TMDB ID search returns no results, or if no ID was provided, we search by the slug.
+    // This is less reliable due to variations in titles (e.g., 'xmen' vs 'x-men').
+    if (candidateVideos.length === 0 && slug) {
+      const searchTerm = slug.replace(/-/g, ' ');
+      log(`Stream match: TMDB ID search failed or skipped. Searching by slug: "${searchTerm}"`);
+      candidateVideos = await searchAllVideos(searchTerm);
+    }
     
-    log(`Stream match request: "${slug}" → "${title}" S${season || 'null'}E${episode || 'null'}, TMDB: ${tmdbId}`);
+    // If we still have no candidates, there's nothing to match.
+    if (candidateVideos.length === 0) {
+        log(`No candidate videos found for slug="${slug}" tmdbId="${tmdbId}"`);
+        return res.json({ success: false, data: [] });
+    }
 
-    // Search using a simplified version of the title for broader results
-    const searchTitle = title.split(' ')[0];
-    const allVideos = await searchAllVideos(searchTitle);
-    const normalizedRequestTitle = normalizeTitle(title);
+    const parsedRequest = parseVideoTitle(slug.replace(/-/g, ' '));
+    let bestMatch = null;
+    let highestScore = -1;
 
-    const match = allVideos.find(item => {
-      const filename = item.name;
-      const { season: fileSeason, episode: fileEpisode } = extractSeasonEpisode(filename);
-      
-      // Priority 1: Exact TMDB ID match
-      if (tmdbId && filename.includes(`{${tmdbId}}`)) {
-        if (season && episode) { // For series, also match season and episode
-            const seasonMatch = fileSeason && season === fileSeason.toString().padStart(2, '0');
-            const episodeMatch = episode && fileEpisode && episode === fileEpisode.toString().padStart(2, '0');
-            return seasonMatch && episodeMatch;
+    // --- Scoring Process ---
+    for (const video of candidateVideos) {
+      const parsedVideo = parseVideoTitle(video.name);
+      let currentScore = 0;
+
+      // Rule 1: TMDB ID Match (Very High Priority)
+      // This is crucial. Even if we found the video via title, we confirm with the TMDB ID.
+      if (tmdbId && video.name.includes(`{${tmdbId}}`)) {
+        currentScore += 100;
+      }
+
+      // Rule 2: Normalized Title Match
+      // We use normalize() to remove spaces and special chars, making 'xmen' match 'x-men' or 'x men'.
+      const normalizedRequestTitle = normalize(parsedRequest.title);
+      const normalizedVideoTitle = normalize(parsedVideo.title);
+
+      if (normalizedRequestTitle === normalizedVideoTitle) {
+        currentScore += 50; // Exact normalized title match is a strong signal
+      } else if (normalizedVideoTitle.includes(normalizedRequestTitle)) {
+        currentScore += 20; // Partial match is a weaker signal
+      } else {
+        // If titles don't even have a partial match, it's a poor candidate unless the TMDB ID matched.
+        currentScore -= 20;
+      }
+
+      // Rule 3: Metadata Match (Season/Episode for Series, Year for Movies)
+      if (parsedRequest.isSeries) {
+        if (parsedVideo.isSeries && parsedRequest.season === parsedVideo.season && parsedRequest.episode === parsedVideo.episode) {
+          currentScore += 50; // Perfect S/E match is very strong
         }
-        return true; // For movies, TMDB ID is enough
+      } else { // It's a movie request
+        if (!parsedVideo.isSeries && parsedRequest.year && parsedRequest.year === parsedVideo.year) {
+          currentScore += 40; // Year match for movies is a strong signal
+        }
       }
 
-      // Priority 2: Normalized title match
-      const fileInfo = parseVideoTitle(filename);
-      const normalizedFileTitle = normalizeTitle(fileInfo.title);
-      
-      const titleMatch = normalizedFileTitle === normalizedRequestTitle;
-
-      if (titleMatch) {
-         if (season && episode) { // For series
-            const seasonMatch = fileSeason && season === fileSeason.toString().padStart(2, '0');
-            const episodeMatch = episode && fileEpisode && episode === fileEpisode.toString().padStart(2, '0');
-            return seasonMatch && episodeMatch;
-         }
-         return true; // For movies
+      // Update the best match if the current video has a higher score
+      if (currentScore > highestScore) {
+        highestScore = currentScore;
+        bestMatch = video;
       }
-      
-      return false;
-    });
+    }
 
-    if (match) {
-      const downloadUrl = `https://moonflix.p2pplay.pro/#${match.id}&dl=1`;
-      log(`Stream match found: ${match.name}`);
+    // --- Final Decision ---
+    // We set a threshold to avoid returning a low-confidence match. A score of 50 or more is good.
+    if (bestMatch && highestScore > 50) { 
+      const downloadUrl = `https://moonflix.p2pplay.pro/#${bestMatch.id}&dl=1`;
+      log(`Stream match FOUND for "${slug}" with score ${highestScore}: ${bestMatch.name}`);
       
       res.json({
         success: true,
         data: [{
-          ...match,
+          ...bestMatch,
           downloadUrl,
-          streamUrl: `https://moonflix.p2pplay.pro/#${match.id}`
+          streamUrl: `https://moonflix.p2pplay.pro/#${bestMatch.id}`
         }]
       });
     } else {
-      log(`No stream match found for: ${slug}`);
+      log(`No confident stream match found for: "${slug}" (Best score: ${highestScore})`);
       res.json({ success: false, data: [] });
     }
 
@@ -2362,28 +2491,9 @@ app.get('/api/stream/match', async (req, res) => {
     });
   }
 });
-
-// FIXED: More robust slug parsing
-const parseSlug = (slug = '') => {
-  const seasonMatch = slug.match(/\/season-(\d+)/);
-  const episodeMatch = slug.match(/\/episode-(\d+)/);
-  
-  const season = seasonMatch ? seasonMatch[1].padStart(2, '0') : null;
-  const episode = episodeMatch ? episodeMatch[1].padStart(2, '0') : null;
-
-  let title = slug;
-  if (seasonMatch) {
-    title = title.substring(0, seasonMatch.index);
-  } else if (episodeMatch) {
-    // Handle cases where only episode is present
-    title = title.substring(0, episodeMatch.index);
-  }
-  
-  // Remove trailing slashes and replace hyphens
-  title = title.replace(/\/$/, '').replace(/-/g, ' ').trim();
-
-  return { title, season, episode };
-};
+// ===================================================================
+// END: REWRITTEN MATCHING ENDPOINT
+// ===================================================================
 
 
 // Upload from URL endpoint
@@ -2687,7 +2797,7 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
-    version: '2.1.0-professional'
+    version: '2.2.0-professional'
   });
 });
 
@@ -2696,7 +2806,7 @@ app.get('/api/status', (req, res) => {
   res.json({
     success: true,
     server: 'StreamP2P Manager Professional',
-    version: '2.1.0-professional',
+    version: '2.2.0-professional',
     uptime: process.uptime(),
     features: [
       '🔍 Advanced Video Search with Episode Organization',
@@ -2709,7 +2819,8 @@ app.get('/api/status', (req, res) => {
       '🆔 IMDB ID Integration for Movies & TV Shows',
       '🔁 Single & Batch Video Cloning',
       '🗑️ Single Request Deletion from Dashboard',
-      '🛠️ Manual Rename for Failed Items'
+      '🛠️ Manual Rename for Failed Items',
+      '🧠 vastly improved filename parsing logic'
     ],
     endpoints: {
       'GET /': 'Server status',
@@ -2742,11 +2853,12 @@ app.get('/api/status', (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    message: '🎬 StreamP2P Manager Server v2.1 Professional',
-    version: '2.1.0-professional',
+    message: '🎬 StreamP2P Manager Server v2.2 Professional',
+    version: '2.2.0-professional',
     status: 'Running',
     newFeatures: [
-      '🎯 Fixed stream matching for titles with special characters',
+      '🧠 Rewritten filename parsing logic to handle complex and messy titles.',
+      '🎯 More accurate title, year, and episode extraction.',
       '🗑️ Added single request deletion from the dashboard',
       '🛠️ Added manual rename interface for failed batch renames'
     ]
@@ -2792,11 +2904,12 @@ process.on('uncaughtException', (error) => {
 
 // Start server
 app.listen(PORT, () => {
-  log(`🚀 StreamP2P Manager v2.1 Professional running on http://localhost:${PORT}`);
+  log(`🚀 StreamP2P Manager v2.2 Professional running on http://localhost:${PORT}`);
   log(`📊 Dashboard: http://localhost:${PORT}/dashboard?pass=${CONFIG.DASHBOARD_PASSWORD}`);
   log(`🔧 API Status: http://localhost:${PORT}/api/status`);
   log(`✨ NEW Features & Fixes:`);
-  log(`   🎯 FIXED: Stream matching for titles like 'Ginny & Georgia'`);
+  log(`   🧠 FIXED: Rewritten filename parsing logic for much higher accuracy.`);
+  log(`   🎯 NEW: Highly accurate, scoring-based stream matching endpoint.`);
   log(`   🗑️ NEW: Delete single requests directly from the dashboard`);
   log(`   🛠️ NEW: Manually correct and rename files that failed the batch process`);
   log(`🎉 Your professional media management server is ready!`);
