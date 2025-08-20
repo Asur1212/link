@@ -2383,7 +2383,7 @@ const getTusEndpoint = async () => {
 };
 
 // ===================================================================
-// START: REWRITTEN AND FIXED MATCHING ENDPOINT
+// START: CORRECTED AND REWRITTEN MATCHING ENDPOINT
 // ===================================================================
 app.get('/api/stream/match', async (req, res) => {
   try {
@@ -2394,80 +2394,100 @@ app.get('/api/stream/match', async (req, res) => {
 
     let candidateVideos = [];
 
-    // --- Path 1: The Golden Path via TMDB ID (Highest Accuracy) ---
-    // If a tmdbId is provided, we search for it directly. This is the most reliable method.
+    // --- Path 1: Search by TMDB ID (Highest Accuracy) ---
     if (tmdbId) {
-      log(`Stream match: Starting search with TMDB ID: ${tmdbId}`);
+      log(`Stream match: Searching with TMDB ID: ${tmdbId}`);
       candidateVideos = await searchAllVideos(`{${tmdbId}}`);
     }
 
     // --- Path 2: Fallback to Title Search ---
-    // If the TMDB ID search returns no results, or if no ID was provided, we search by the slug.
-    // This is less reliable due to variations in titles (e.g., 'xmen' vs 'x-men').
     if (candidateVideos.length === 0 && slug) {
-      const searchTerm = slug.replace(/-/g, ' ');
+      const searchTerm = slug.replace(/[\/-]/g, ' ');
       log(`Stream match: TMDB ID search failed or skipped. Searching by slug: "${searchTerm}"`);
       candidateVideos = await searchAllVideos(searchTerm);
     }
     
-    // If we still have no candidates, there's nothing to match.
     if (candidateVideos.length === 0) {
         log(`No candidate videos found for slug="${slug}" tmdbId="${tmdbId}"`);
         return res.json({ success: false, data: [] });
     }
 
-    const parsedRequest = parseVideoTitle(slug.replace(/-/g, ' '));
+    // Parse the incoming request slug to understand what the user wants.
+    // Replace both slashes and dashes with spaces for better parsing.
+    const parsedRequest = parseVideoTitle(slug.replace(/[\/-]/g, ' '));
+
+    // --- Logic Branch: Handle Series and Movies Differently ---
+
+    // BRANCH 1: PRECISE SERIES MATCHING
+    // If the request is for a series, we MUST match the season and episode exactly.
+    if (parsedRequest.isSeries && parsedRequest.season && parsedRequest.episode) {
+      log(`Precise series match initiated for S${parsedRequest.season}E${parsedRequest.episode}`);
+      
+      const exactMatch = candidateVideos.find(video => {
+          const parsedVideo = parseVideoTitle(video.name);
+          return (
+              parsedVideo.isSeries &&
+              parsedVideo.season === parsedRequest.season &&
+              parsedVideo.episode === parsedRequest.episode
+          );
+      });
+
+      if (exactMatch) {
+          log(`Exact series match FOUND: ${exactMatch.name}`);
+          const downloadUrl = `https://moonflix.p2pplay.pro/#${exactMatch.id}&dl=1`;
+          return res.json({
+              success: true,
+              data: [{
+                  ...exactMatch,
+                  downloadUrl,
+                  streamUrl: `https://moonflix.p2pplay.pro/#${exactMatch.id}`
+              }]
+          });
+      } else {
+          log(`No exact S/E match found for S${parsedRequest.season}E${parsedRequest.episode}. The requested episode may not exist in the library.`);
+          return res.json({ success: false, data: [], message: "Exact episode not found." });
+      }
+    }
+
+    // BRANCH 2: FALLBACK SCORING LOGIC (Mainly for Movies)
+    // If it's not a series request, use the original scoring logic.
+    log(`Request is for a movie or a generic series title. Using scoring logic.`);
     let bestMatch = null;
     let highestScore = -1;
 
-    // --- Scoring Process ---
     for (const video of candidateVideos) {
       const parsedVideo = parseVideoTitle(video.name);
       let currentScore = 0;
 
-      // Rule 1: TMDB ID Match (Very High Priority)
-      // This is crucial. Even if we found the video via title, we confirm with the TMDB ID.
+      // Rule 1: TMDB ID Match (High Priority)
       if (tmdbId && video.name.includes(`{${tmdbId}}`)) {
         currentScore += 100;
       }
 
       // Rule 2: Normalized Title Match
-      // We use normalize() to remove spaces and special chars, making 'xmen' match 'x-men' or 'x men'.
       const normalizedRequestTitle = normalize(parsedRequest.title);
       const normalizedVideoTitle = normalize(parsedVideo.title);
-
       if (normalizedRequestTitle === normalizedVideoTitle) {
-        currentScore += 50; // Exact normalized title match is a strong signal
+        currentScore += 50;
       } else if (normalizedVideoTitle.includes(normalizedRequestTitle)) {
-        currentScore += 20; // Partial match is a weaker signal
-      } else {
-        // If titles don't even have a partial match, it's a poor candidate unless the TMDB ID matched.
-        currentScore -= 20;
+        currentScore += 20;
       }
 
-      // Rule 3: Metadata Match (Season/Episode for Series, Year for Movies)
-      if (parsedRequest.isSeries) {
-        if (parsedVideo.isSeries && parsedRequest.season === parsedVideo.season && parsedRequest.episode === parsedVideo.episode) {
-          currentScore += 50; // Perfect S/E match is very strong
-        }
-      } else { // It's a movie request
-        if (!parsedVideo.isSeries && parsedRequest.year && parsedRequest.year === parsedVideo.year) {
-          currentScore += 40; // Year match for movies is a strong signal
-        }
+      // Rule 3: Year Match (for movies)
+      if (!parsedRequest.isSeries && !parsedVideo.isSeries && parsedRequest.year && parsedRequest.year === parsedVideo.year) {
+        currentScore += 40;
       }
 
-      // Update the best match if the current video has a higher score
       if (currentScore > highestScore) {
         highestScore = currentScore;
         bestMatch = video;
       }
     }
 
-    // --- Final Decision ---
-    // We set a threshold to avoid returning a low-confidence match. A score of 50 or more is good.
+    // Final Decision for movies
     if (bestMatch && highestScore > 50) { 
       const downloadUrl = `https://moonflix.p2pplay.pro/#${bestMatch.id}&dl=1`;
-      log(`Stream match FOUND for "${slug}" with score ${highestScore}: ${bestMatch.name}`);
+      log(`Stream match FOUND for movie "${slug}" with score ${highestScore}: ${bestMatch.name}`);
       
       res.json({
         success: true,
@@ -2492,7 +2512,7 @@ app.get('/api/stream/match', async (req, res) => {
   }
 });
 // ===================================================================
-// END: REWRITTEN MATCHING ENDPOINT
+// END: CORRECTED MATCHING ENDPOINT
 // ===================================================================
 
 
@@ -2909,7 +2929,7 @@ app.listen(PORT, () => {
   log(`🔧 API Status: http://localhost:${PORT}/api/status`);
   log(`✨ NEW Features & Fixes:`);
   log(`   🧠 FIXED: Rewritten filename parsing logic for much higher accuracy.`);
-  log(`   🎯 NEW: Highly accurate, scoring-based stream matching endpoint.`);
+  log(`   🎯 FIXED: Highly accurate, strict stream matching endpoint for series.`);
   log(`   🗑️ NEW: Delete single requests directly from the dashboard`);
   log(`   🛠️ NEW: Manually correct and rename files that failed the batch process`);
   log(`🎉 Your professional media management server is ready!`);
